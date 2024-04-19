@@ -56,5 +56,6 @@ function enumerateModules(){
   }
 
 Java.perform(function() {
-enumerateModules(); 
+enumerateExportsJs('libsscronet.so');
+ 
 });
