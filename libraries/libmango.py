@@ -191,7 +191,7 @@ class parser(cmd2.Cmd):
     schemes = set()
     pathPrefixes = set()
     manifest = None
-
+    libraries = None
     strings = []
     packages = []
 
@@ -393,17 +393,42 @@ class parser(cmd2.Cmd):
     def do_install(self, line):
         """Usage: install /full/path/to/foobar.apk
         Install an apk to the device."""
-
-        try:
-            if len(line.split(' ')):
-                apk_file = line.split(' ')[0]
-
+        
+        if len(line.arg_list) > 0:
+            try:
+                apk_file = line.arg_list[0]
                 if os.path.exists(apk_file):
                     self.do_adb('adb', f'install {apk_file}', True)
                 else:
-                    print(Fore.RED + f"[!] Error: can't find: {apk_file} " + Fore.RESET)
-        except Exception as e:
-            print(e)
+                    raise FileNotFoundError(Fore.RED + f"[!] Error: can't find: {apk_file}. App not installed" + Fore.RESET)
+            except FileNotFoundError as e:
+                print(e)
+        else:
+            print('[!] Usage: install /full/path/to/foobar.apk')
+
+
+    def do_installmultiple(self,line):
+        """Usage: installmultiple /full/path/to/foobar.apk /full/path/to/foobar2.apk ...
+        Install multiple apks for a single package on the device."""
+
+        if len(line.arg_list) > 1:
+            try:
+                apk_files = line.arg_list
+                adb_command = 'install-multiple'
+                for apk_file in apk_files:
+                    if os.path.exists(apk_file):
+                        adb_command += f' {apk_file}'
+                    else:
+                        raise FileNotFoundError(Fore.RED + f"[!] Error: can't find: {apk_file}. App not installed" + Fore.RESET)
+                
+                self.do_adb('adb',adb_command,True)
+            except FileNotFoundError as e:
+                print(e)
+        else:
+            print('[!] Usage: installmultiple /full/path/to/foobar.apk /full/path/to/foobar2.apk ...')
+
+
+
 
     def do_installagent(self, line):
         """Usage: installagent
@@ -496,7 +521,7 @@ $adb remount
     def do_load(self, line):
         """Usage: load [package_name]
         Load an application which allready exists in the current (working) database."""
-        self.real_load_app(line.strip('"').split(':')[1])
+        self.real_load_app(line.split(':')[1])
         return
 
     def do_loaddevice(self, line) -> None:
@@ -635,6 +660,7 @@ $adb remount
         else:
             print("[!] File doesn't exist.")
 
+
     def do_playstore(self, line):
         """Usage: playstore package_name
         Search the playstore for the app with the given id."""
@@ -681,17 +707,48 @@ $adb remount
         Extracts an apk from the device and saves it as 'base.apk' in the working directory.
         Use it in combination with the tab key to see available packages"""
 
-        package = line.split(' ')[0]
-        try:
-            base_apk = os.popen(
-                f"adb -s {self.device.id} shell pm path {package} | grep base.apk | cut -d ':' -f 2").read()
-            print("Extracting: " + base_apk)
-            output = os.popen("adb -s {} pull {}".format(self.device.id, base_apk, package)).read()
-            print(output)
-            if Polar('Do you want to import the application?').ask():
-                self.do_import('base.apk')
-        except Exception as e:
-            print(e)
+        if len(line.arg_list) > 0:
+
+            package = line.arg_list[0]
+
+
+            try:
+                base_apk = os.popen(
+                    f"adb -s {self.device.id} shell pm path {package} | grep base.apk | cut -d ':' -f 2").read()
+                print("Extracting: " + base_apk)
+                output = os.popen("adb -s {} pull {}".format(self.device.id, base_apk, package)).read()
+                print(output)
+
+                if Polar('Do you want to import the application?').ask():
+                    self.do_import('base.apk')
+            except Exception as e:
+                print(e)
+        else:
+            print('[!] Usage: pull com.foo.bar')
+
+    def do_pullmultiple(self, line):
+        """Usage: pullmultiple com.foo.bar
+        Extracts an apk and all the split_config* apk packages (from bundled apk)
+        from the device and saves it as 'base.apk' and 'split_config*'
+        in the working directory.
+        Use it in combination with the tab key to see available packages"""
+        
+        if len(line.arg_list) > 0:
+            self.do_pull(line)
+            package = line.arg_list[0]
+            
+            try:
+                split_apks = os.popen(
+                f"adb -s {self.device.id} shell pm path {package} | grep split | cut -d ':' -f 2").read().splitlines()
+                for split_apk in split_apks:
+                    print("Extracting: " + split_apk)
+                    output = os.popen("adb -s {} pull {}".format(self.device.id, split_apk, package)).read()
+                    print(output)
+            except Exception as e:
+                print(e)
+        else:
+            print('[!] Usage: pullmultiple com.foo.bar')
+
 
     def do_query(self, line):
         """Usage: query SELECT * FROM [table name]
@@ -841,6 +898,8 @@ $adb remount
                     print(self.manifest[0][0].decode('utf-8'))
                 elif 'strings' in what:
                     self.print_strings()
+                elif 'libraries' in what:
+                    self.print_libraries()
                 elif 'exposure' in what:
                     print(
                         "|----------------------------------- [ ⚠️  ] Potential attack targets [ ⚠️  ] ---------------------------------------|\n[+] Deeplinks:")
@@ -1005,7 +1064,7 @@ $adb remount
         res = self.database.query_db("SELECT packageName, sha256, versionName from Application order by packagename asc;")
         appSha256 = []
         for entry in res:
-            appSha256.append(entry[0] + ':' + entry[1]+ ' (V.'+entry[2]+')')
+            appSha256.append(entry[0] + ':' + entry[1])
 
         if not text:
             completions = appSha256[:]
@@ -1029,13 +1088,16 @@ $adb remount
     def complete_pull(self, text, line, begidx, endidx):
         return self.get_packages_starting_with(text)
 
+    def complete_pullmultiple(self, text, line, begidx, endidx):
+        return self.get_packages_starting_with(text)
+
     def complete_show(self, text, line, begidx, endidx):
         if self.current_app_sha256 is None:
             components = ['database', 'applications']
         else:
             components = sorted(
                 ['exposure', 'applications', 'activityAlias', 'info', 'permissions', 'activities', 'services',
-                 'receivers', 'intentFilters', 'providers', 'deeplinks', 'strings', 'database', 'manifest'])
+                 'receivers', 'intentFilters', 'providers', 'deeplinks', 'strings', 'database', 'manifest', 'libraries'])
         if not text:
             completions = components[:]
         else:
@@ -1127,12 +1189,13 @@ $adb remount
 |    Debuggable        :{}
 |    Allow Backup      :{}
 |    Evasion Tactics   :{}
+|    Dev. Framework    :{}
 [------------------------------------------------------------------------------------------]
 |                          Type 'help' or 'man' for a list of commands                     |
 [------------------------------------------------------------------------------------------]
         """.format(info[0][14], info[0][1], info[0][2], info[0][3], info[0][4],
                    info[0][5], info[0][6], info[0][7], info[0][0], info[0][10], info[0][11],
-                   info[0][15]) + Style.RESET_ALL)
+                   info[0][15], info[0][16]) + Style.RESET_ALL)
         print(BLUE + "[i] Notes:" + RESET)
         notes = self.database.get_all_notes(info[0][0])
         if len(notes) == 0:
@@ -1151,7 +1214,6 @@ $adb remount
                 print("{c: <25} {t: <15}".format(c=column[1], t=column[2]))
 
     def print_deeplinks(self, quite=False):
-        display_text = ''
         component = ''
         schmlst = []
         hostlst = []
@@ -1228,7 +1290,6 @@ $adb remount
             self.total_deep_links += tmplst
 
     def print_intent_filters(self):
-        display_text = ''
         for attribs in self.intent_filters:
             l = len(attribs[0])
             print(Fore.GREEN + '-' * l + f'\nComponent:{attribs[0]}' + Fore.RESET)
@@ -1240,6 +1301,9 @@ $adb remount
 
             print(Fore.GREEN + '-' * l + Fore.RESET)
         print(Style.RESET_ALL)
+
+    def print_libraries(self):
+        print('Application Libraries: ' + ' '.join(str(entry) for entry in self.libraries))
 
     def print_permissions(self):
         display_text = ''
@@ -1366,15 +1430,16 @@ $adb remount
     ###################################################### rest of defs start ############################################################
 
     def print_avail_apps(self, count_pkg=False):
-        res = self.database.query_db("SELECT sha256, packageName, versionName from Application order by packagename asc;")
+        res = self.database.query_db("SELECT sha256, packageName, versionName, framework from Application order by packagename asc;")
         index = 0
         if res:
             print(
-                Fore.GREEN + "[i] Availlable applications:\n" + Fore.RESET + "-" * 7 + " " + "-" * 70 + " " + "-" * 57 + "\n {0} {1:^68} {2:^60}\n".format(
-                    "index", "sha256", "Package Name") + "-" * 7 + " " + "-" * 70 + " " + "-" * 57)
+                Fore.GREEN + "[i] Availlable applications:\n" + Fore.RESET + "-" * 7 + " " + "-" * 65 + "  " + "-" * 57 + "\n {0} {1:^68}  {2:^60}\n".format(
+                    "index", "sha256", "Package Name (Version) / Dev. Framework") + "-" * 7 + " " + "-" * 65 + "  " + "-" * 57)
             for entry in res:
-                sha256, package_name, version = entry
-                print(Fore.CYAN + Style.BRIGHT + "{0:^7} {1:^68}\t {2:<60}".format(index, sha256, package_name + f" {Fore.LIGHTGREEN_EX+'(V.'+version})",))
+                sha256, package_name, version, framework = entry
+                framework = '' if framework == 'None Detected' else '/ ' + framework
+                print(Fore.CYAN + Style.BRIGHT + "{0:^7} {1:^64}   {2:<60}".format(index, sha256, package_name + f" {Fore.LIGHTGREEN_EX+'(V.'+version}) {framework}",))
                 index += 1
                 if count_pkg:
                     self.total_apps.append(package_name + ":" + sha256)
@@ -1383,15 +1448,18 @@ $adb remount
 
     def continue_session(self, guava):
         self.guava = guava
-        res, index = self.print_avail_apps(True)
-        if res:
-            chosen_index = int(Numeric(Style.RESET_ALL + '\nEnter the index of  application to load:', lbound=0,
-                                       ubound=index - 1).ask())
-            chosen_sha256 = res[chosen_index][0]
-            self.init_application_info(self.database, chosen_sha256)
-        else:
-            print(Fore.RED + Style.BRIGHT + "[!] No Entries found in the given database !" + Style.RESET_ALL)
-        return
+        try:
+            res, index = self.print_avail_apps(True)
+            if res:
+                chosen_index = int(Numeric(Style.RESET_ALL + '\nEnter the index of  application to load:', lbound=0,
+                                        ubound=index - 1).ask())
+                chosen_sha256 = res[chosen_index][0]
+                self.init_application_info(self.database, chosen_sha256)
+            else:
+                print(Fore.RED + Style.BRIGHT + "[!] No Entries found in the given database !" + Style.RESET_ALL)
+            return
+        except TypeError:
+            print("Database is empty.")
 
     def create_script(self, opsys, line):
         switch = line.split(' ')[0].strip()
@@ -1443,6 +1511,7 @@ $adb remount
             self.info = application_database.get_app_info(app_sha256)
             self.print_application_info(self.info)
             self.activities = application_database.get_all_activities(app_sha256)
+            self.libraries = application_database.get_libraries(app_sha256)
             self.permissions = application_database.get_all_permissions(app_sha256)
             self.services = application_database.get_all_services(app_sha256)
             self.activityallias = application_database.get_all_alias_activities(app_sha256)

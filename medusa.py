@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import subprocess, platform, os, sys, readline, time, argparse, requests, re
 from urllib.parse import urlparse
-import cmd2, click, frida, random, yaml, sys
+import cmd2, click, frida, random, yaml, sys, traceback
 from libraries.dumper import dump_pkg
 from utils.google_trans_new import google_translator
 from libraries.natives import *
@@ -59,6 +59,9 @@ class Parser(cmd2.Cmd):
     package_name = None
     save_to_file = None
     device_id = None
+
+    class NonInteractiveTypeError(Exception):
+        pass
 
     def __init__(self):
         super().__init__(
@@ -345,8 +348,8 @@ class Parser(cmd2.Cmd):
         Usage: get package_name full.path.to.class.field
         """
         try:
-            package_name = line.split(' ')[0]
-            class_field_path = line.split(' ')[1]
+            package_name = line.arg_list[0]
+            class_field_path = line.arg_list[1]
             field = class_field_path.split('.')[-1]
             clazz = '.'.join(class_field_path.split('.')[:-1])
             if field == '*':
@@ -381,17 +384,32 @@ class Parser(cmd2.Cmd):
                         var field = jClass.class.getDeclaredField('"""+field+"""')
                         field.setAccessible(true); 
                         var rvalue = field.get(instance);
-                        try {
-                            var isIter = Java.cast(rvalue, IterableClass);
-                            if(isIter){
-                                console.log('Iterable detected. Trying to dump:')
-                                var iter = isIter.iterator();
-                                while(iter.hasNext()){    
-                                    console.log('\t'+iter.next())
-                                    }
-                                } 
-                            }catch(e){ 
-                        }
+                        try{
+                        var isIter = Java.cast(rvalue, IterableClass);
+                        if(isIter){
+                            console.log('Iterable detected. Trying to dump:')
+                            var iter = isIter.iterator();
+                            while(iter.hasNext()){
+                                console.log('	'+iter.next())
+                                }
+                            }
+                        } catch(e){ }
+                    
+                        try{
+                            var hashMap = Java.cast(rvalue, Java.use('java.util.HashMap'));
+                            if(hashMap){
+                            console.log('Instance is a HashMap. Dumping entries:');
+                            var entrySet = hashMap.entrySet();
+                            var iterator = entrySet.iterator();
+                            while (iterator.hasNext()) {
+                                var entry = Java.cast(iterator.next(), Java.use('java.util.Map$Entry'));
+                                var key = entry.getKey().toString();
+                                var value = entry.getValue().toString();
+                                console.log('Key: ' + key + ', Value: ' + value);
+                            }
+                            }
+                        } catch(e){ }
+
                     }, onComplete: function() {
                 }
             })
@@ -539,7 +557,7 @@ class Parser(cmd2.Cmd):
             -n                        : Initiate a dialog for hooking a native method
             -r                        : Reset the hooks set so far
         """
-        option = line.split(' ')[0]
+        option = line.arg_list[0]
         codejs = '\n'
         if option == '-f':
             className = input("Enter the full name of the method(s)'s class: ")
@@ -591,12 +609,12 @@ class Parser(cmd2.Cmd):
                     break
 
         elif option == '-a':
-            aclass = line.split(' ')[1].strip()
+            aclass = line.arg_list[1]
             if aclass == '':
                 print('[i] Usage hook -a class_name')
             else:
-                if len(line.split(' ')) > 2:
-                    if line.split(' ')[2].strip() == '--color':
+                if len(line.arg_list) > 2:
+                    if line.arg_list[2] == '--color':
                         colors = ['Blue', 'Cyan', 'Gray', 'Green', 'Purple', 'Red', 'Yellow']
                         option, index = pick(colors, "Available colors:", indicator="=>", default_index=0)
                         self.hookall(aclass, option)
@@ -810,10 +828,14 @@ class Parser(cmd2.Cmd):
                     int(Numeric('\nEnter the index of the device to use:', lbound=0, ubound=len(devices) - 1).ask())]
                 android_dev = android_device(self.device.id)
                 android_dev.print_dev_properties()
+            elif self.is_remote_device(self.device_id):
+                self.device = frida.get_remote_device(self.device_id)
             else:
                 self.device = frida.get_device(self.device_id)
         except:
             self.device = frida.get_remote_device()
+            if not self.interactive:
+                raise self.NonInteractiveTypeError("Device unreachable !")
         finally:
             # lets start by loading all packages and let the user to filter them out
             if self.interactive:
@@ -1107,7 +1129,10 @@ class Parser(cmd2.Cmd):
                 print("Invalid arguments.")
 
         except Exception as e:
-            print(f"An error occurred: {e}")
+            if not self.interactive:
+                raise self.NonInteractiveTypeError(e)
+            else:
+                print(f"An error occurred: {e}")
 
     def do_snippet(self, line) -> None:
         """
@@ -1415,14 +1440,29 @@ class Parser(cmd2.Cmd):
         print(
             "\nHooks have been added to the" + GREEN + " scratchpad" + RESET + " run 'compile' to include it in your final script")
 
-        # aclass = line.split(' ')[0]
-        # if  aclass == '':
-        #     print('[i] Usage: hookall [class name]')
-        # else:
-        #     className = aclass
-        #     codejs = "traceClass('"+className+"');\n"
-        #     self.edit_scratchpad(codejs, 'a')
-        #     print("\nHooks have been added to the" + GREEN + " scratchpad" + RESET + " run 'compile' to include it in your final script")
+    def is_remote_device(self, ip_or_ip_with_port):
+        # Regular expression pattern to match IPv4 addresses with optional port number
+        ipv4_or_ipv4_with_port_pattern = r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?$'
+        # Check if the string matches the IPv4 or IPv4 with port pattern
+        if re.match(ipv4_or_ipv4_with_port_pattern, ip_or_ip_with_port):
+            # Split the IP and port parts
+            parts = ip_or_ip_with_port.split(':')
+            ip = parts[0]
+            port = int(parts[1]) if len(parts) == 2 else None
+    
+            # Check if each octet of the IP is within the valid range (0-255)
+            octets = ip.split('.')
+            for octet in octets:
+                if not (0 <= int(octet) <= 255):
+                    return False
+            
+            # Check if the port is within the valid range (1-65535)
+            if port is not None and not (1 <= port <= 65535):
+                return False
+            
+            return True
+        else:
+            return False
 
     def frida_session_handler(self, con_device, force, pkg, pid=-1):
         time.sleep(1)
@@ -1645,12 +1685,11 @@ Apk Directory: {packageCodePath}\n""" + RESET)
             device = frida.get_device_manager() \
                 .add_remote_device(f'{host}:{port}')
             print(f'Using device:{device}')
-        recording = self.package_name+'-'+str(int(time.time()))+'.mp4'
+        recording = package_name+'-'+str(int(time.time()))+'.mp4'
         os.popen(f"adb -s {self.device.id} shell screenrecord /sdcard/{recording} --time-limit {self.time_to_run}")
-
         self.detached = False
-        session = self.frida_session_handler(device, force, package_name, pid)
         try:
+            session = self.frida_session_handler(device, force, package_name, pid)
             with open(os.path.join(self.base_directory, agent_script)) as f:
                 self.script = session.create_script(f.read())
 
@@ -1684,9 +1723,7 @@ Apk Directory: {packageCodePath}\n""" + RESET)
             sys.exit(0)
 
         except Exception as e:
-            print(e)
-        print(RESET)
-
+            raise self.NonInteractiveTypeError(e)
 
     def run_frida(self, force, detached, package_name, device, pid=-1, host='', port='') -> None:
         if host != '' and port != '':
@@ -1987,15 +2024,31 @@ Apk Directory: {packageCodePath}\n""" + RESET)
                 if data != '':
                     click.echo(click.style("[+] Writing to scratchpad...", bg='blue', fg='white'))
                     self.edit_scratchpad(data)
+            elif not self.interactive:
+                raise self.NonInteractiveTypeError("Recipe not found!")
             else:
                 click.echo(click.style("[!] Recipe not found !", bg='red', fg='white'))
         except Exception as e:
-            print(e)
+            if not self.interactive:
+                raise self.NonInteractiveTypeError(e)
+            else:
+                print(e)
 
+
+def non_interactive_excepthook(exc_type, exc_value, tb):
+    if exc_type == Parser.NonInteractiveTypeError:
+        print("Error in non interactive mode:", exc_type, exc_value)
+        traceback.print_tb(tb)
+        sys.exit(1)
+    else:
+        print("Error in non interactive mode:", exc_type, exc_value)
+        traceback.print_tb(tb)
 
 if __name__ == '__main__':
     if 'libedit' in readline.__doc__:
         readline.parse_and_bind("bind ^I rl_complete")
     else:
         readline.parse_and_bind("tab: complete")
+
+    sys.excepthook = non_interactive_excepthook
     Parser().cmdloop()
